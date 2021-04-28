@@ -116,14 +116,32 @@ class _DDPUnevenInputsConfig(NamedTuple):
 # is completed.
 class _DDPSink(Function):
     @staticmethod
-    def forward(ctx, reducer, *inputs):
+    def forward(ctx, reducer, state_dict, *inputs):
         ctx.reducer = reducer
+        ctx.state_dict = state_dict
+        ctx.inputs = inputs
         return inputs
 
     @staticmethod
     def backward(ctx, *grad_outputs):
-        Variable._execution_engine.queue_callback(ctx.reducer._delay_all_reduce)
-        return None, *grad_outputs
+        state_dict = ctx.state_dict
+        if state_dict['grad_enabled_in_fwd_pass'] and state_dict['require_backward_grad_sync']:
+            if state_dict['find_unused_parameters']:
+                used_inputs = []
+                outputs_unused_indices = []
+                for idx, inp in enumerate(ctx.inputs):
+                    incoming_grad_for_output = grad_outputs[idx]
+                    if incoming_grad_for_output.sum().item() != 0:
+                        used_inputs.append(inp)
+                    else:
+                        outputs_unused_indices.append(idx)
+                ctx.reducer.prepare_for_backward(used_inputs)
+                ctx.reducer.set_per_iteration_param_outputs_unused(outputs_unused_indices)
+            else:
+                ctx.reducer.prepare_for_backward([])
+        if ctx.state_dict['static_graph']:
+            Variable._execution_engine.queue_callback(ctx.reducer._delay_all_reduce)
+        return (None, None, *grad_outputs)
 
 class DistributedDataParallel(Module):
     r"""Implements distributed data parallelism that is based on
@@ -808,33 +826,30 @@ class DistributedDataParallel(Module):
         else:
             output = self.module(*inputs, **kwargs)
 
-        if torch.is_grad_enabled() and self.require_backward_grad_sync:
-            self.require_forward_param_sync = True
-            # We'll return the output object verbatim since it is a freeform
-            # object. We need to find any tensors in this object, though,
-            # because we need to figure out which parameters were used during
-            # this forward pass, to ensure we short circuit reduction for any
-            # unused parameters. Only if `find_unused_parameters` is set.
-            if self.find_unused_parameters:
-                self.reducer.prepare_for_backward(list(_find_tensors(output)))
-            else:
-                self.reducer.prepare_for_backward([])
-        else:
-            self.require_forward_param_sync = False
+        grad_enabled = torch.is_grad_enabled()
+        self.require_forward_param_sync = (
+            grad_enabled and self.require_backward_grad_sync
+        )
 
-        # TODO. Right now we add this sink for static_graph training only. once
-        # this feature is stable, we will add this sink for all cases. E.g.
-        # This sink can help capture more accuracte backward start time as well.
-        if self.static_graph:
-            # Need to grab list of tensors from user output in order to pass
-            # to custom autograd function.
-            output_tensor_list, treespec = tree_flatten(output)
-            passthrough_tensor_list = _DDPSink.apply(
-                self.reducer,
-                *output_tensor_list
-            )
-            # Reconstruct output data structure.
-            output = tree_unflatten(passthrough_tensor_list, treespec)
+        # Run tensors in output through a passthrough autograd function. This is
+        # so that we can run certain logic at the beginning of the backwards
+        # pass via the backwards implemented in _DDPSink.
+        # Need to grab list of tensors from user output in order to pass
+        # to custom autograd function.
+        output_tensor_list, treespec = tree_flatten(output)
+        state_dict = {
+            'static_graph': self.static_graph,
+            'grad_enabled_in_fwd_pass': grad_enabled,
+            'require_backward_grad_sync': self.require_backward_grad_sync,
+            'find_unused_parameters': self.find_unused_parameters,
+        }
+        passthrough_tensor_list = _DDPSink.apply(
+            self.reducer,
+            state_dict,
+            *output_tensor_list
+        )
+        # Reconstruct output data structure.
+        output = tree_unflatten(passthrough_tensor_list, treespec)
         return output
 
     def scatter(self, inputs, kwargs, device_ids):
