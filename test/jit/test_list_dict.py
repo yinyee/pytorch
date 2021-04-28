@@ -1925,18 +1925,6 @@ class TestNamedTuple(JitTestCase):
         self.assertEqual(tup.b, 3.5)
         self.assertEqual(tup.c, [1, 2, 3])
 
-    def test_named_tuple_default_error(self):
-        class MyCoolNamedTuple(NamedTuple):
-            a : int
-            b : float
-            c : List[int] = [3, 4, 5]
-
-        with self.assertRaisesRegex(RuntimeError, 'Default values are currently not supported'):
-            @torch.jit.script
-            def foo():
-                tup = MyCoolNamedTuple(c=[1, 2, 3], b=3.5, a=9)
-                return tup
-
     @unittest.skipIf(True, "broken while these tests were not in CI")
     def test_named_tuple_serialization(self):
         class MyCoolNamedTuple(NamedTuple):

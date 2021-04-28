@@ -124,7 +124,6 @@ def canonical(graph):
 def LSTMCellF(input, hx, cx, *params):
     return LSTMCell(input, (hx, cx), *params)
 
-
 def doAutodiffCheck(testname):
     # TODO: setting false on test itself is not working
     if "test_t_" in testname or testname == "test_t":
@@ -13790,6 +13789,91 @@ dedent """
                                                   r"for argument \'value\' but instead found type \'int\'."):
             torch.jit.script(test_error)
 
+    def test_namedtuple_default_values_simple_type(self):
+
+        class Point(NamedTuple):
+            x: Optional[int] = None
+            y: int = 2
+
+        make_global(Point)
+
+        class M(torch.nn.Module):
+            def __init__(self):
+                super(M, self).__init__()
+
+            def forward(self, point: Point):
+                return point
+
+        p = Point(x=3, y=2)
+
+        self.checkModule(M(), (p,))
+        self.checkModule(M(), (Point(),))
+
+    def test_namedtuple_default_values_container_type(self):
+
+        class Point(NamedTuple):
+            x: Optional[List[int]] = None
+            y: Optional[List[int]] = [1, 2, 3]
+            z: Optional[Dict[str, int]] = {"a": 1}
+
+        make_global(Point)
+
+        class M(torch.nn.Module):
+            def __init__(self):
+                super(M, self).__init__()
+
+            def forward(self, point: Point):
+                return point
+
+        p = Point(x=[4, 5, 6], y=None, z={"b": 2})
+
+        self.checkModule(M(), (p,))
+        self.checkModule(M(), (Point(),))
+
+    def test_namedtuple_default_values_Tensor_type(self):
+
+        class Point(NamedTuple):
+            x: torch.Tensor = torch.rand(2, 3)
+
+        make_global(Point)
+
+        class M(torch.nn.Module):
+            def __init__(self):
+                super(M, self).__init__()
+
+            def forward(self, point: Point):
+                return point
+
+        p = Point(x=torch.rand(2, 3))
+
+        with self.assertRaisesRegex(RuntimeError, "Tensors are not "
+                                    "supported as default NamedTuple "
+                                    "fields"):
+            m = torch.jit.script(M())
+            m(p)
+
+    def test_namedtuple_default_values_using_factory_constructor(self):
+        Pair = namedtuple("Pair", ["x", "y"], defaults=(1, 2))
+
+        make_global(Pair)
+
+        @torch.jit.script
+        def fn(x: Pair) -> Pair:
+            return x
+
+        print(fn.graph)
+        # TODO: We can't use `checkScript` with the NamedTuple factory
+        # constructor. Using the factory constructor with TorchScript
+        # TorchScript creates an anonymous `NamedTuple` class instead of
+        # preserving the actual name. For example, the actual generated
+        # signature in this case is:
+        #   graph(%x.1 : NamedTuple(x : Tensor, y : Tensor))
+        # It looks like similar test cases have had this issue as well
+        # (see: `test_namedtuple_python`).
+        FileCheck().check("NamedTuple")   \
+                   .check_next(r"return (%x.1)")    \
+                   .run(fn.graph)
+
     def test_isinstance_dynamic(self):
         @torch.jit.script
         def foo(a):
@@ -14970,6 +15054,57 @@ dedent """
             return val1, val2
 
         self.assertEqual(foo(), torch.jit.script(foo)())
+
+    def test_optional_tuple(self):
+        def fn(x=None):
+            # type: (Optional[Tuple[int, int]]) -> Tuple[int, int]
+            if x is None:
+                new_x = (1, 2)
+            else:
+                new_x = x
+            return new_x
+
+        self.checkScript(fn, ((3, 4),))
+        self.checkScript(fn, ())
+
+    def test_namedtuple_redefine(self):
+        global _1, _2
+        _1 = namedtuple('GoogLeNetOutputs', ['logits', 'aux_logits2', 'aux_logits1'])
+        _2 = namedtuple('GoogLeNetOutputs', ['different'])
+
+        with self.assertRaisesRegex(RuntimeError, r'redefine'):
+            @torch.jit.script
+            def foo(x, y):
+                # type: (_1, _2) -> _1
+                return x
+
+    def test_namedtuple_py2(self):
+        global _GoogLeNetOutputs  # see [local resolution in python]
+        _GoogLeNetOutputs = namedtuple('GoogLeNetOutputs', ['logits', 'aux_logits2', 'aux_logits1'])
+
+        @torch.jit.script
+        def foo(x):
+            # type: (_GoogLeNetOutputs) -> _GoogLeNetOutputs
+            return x
+
+        vals = torch.rand(3), torch.rand(4), torch.rand(5)
+        out = foo(_GoogLeNetOutputs(logits=vals[0], aux_logits2=vals[1], aux_logits1=vals[2]))
+        self.assertEqual(out.logits, vals[0])
+        self.assertEqual(out.aux_logits2, vals[1])
+        self.assertEqual(out.aux_logits1, vals[2])
+
+    def test_namedtuple_good_error(self):
+        global _GoogLeNetOutputs  # see [local resolution in python]
+        _GoogLeNetOutputs = namedtuple('GoogLeNetOutputs', ['logits', 'aux_logits2', 'aux_logits1'])
+
+        @torch.jit.script
+        def foo(x):
+            # type: (_GoogLeNetOutputs) -> _GoogLeNetOutputs
+            return x
+
+        with self.assertRaisesRegex(RuntimeError,
+                                    r'aka NamedTuple\(logits, aux_logits2, aux_logits1\)'):
+            out = foo(_GoogLeNetOutputs(logits=3, aux_logits2=4, aux_logits1=5))
 
     def _test_pickle_checkpoint(self, device):
         with TemporaryFileName() as fname:
