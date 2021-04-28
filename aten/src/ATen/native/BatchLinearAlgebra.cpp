@@ -10,6 +10,7 @@
 #include <ATen/native/cpu/zmath.h>
 #include <ATen/Parallel.h>
 
+#include <torch/csrc/autograd/functions/utils.h>
 #include <c10/util/irange.h>
 
 #include <TH/TH.h>  // for USE_LAPACK
@@ -2763,10 +2764,20 @@ Tensor linalg_svdvals(const Tensor& input) {
       "torch.linalg.svdvals: input should have at least 2 dimensions, but has ",
       input.dim(),
       " dimensions instead");
+
   Tensor singular_values;
-  std::tie(std::ignore, singular_values, std::ignore) =
-      // NOLINTNEXTLINE(bugprone-argument-comment)
-      at::_svd_helper(input, /*full_matrices=*/false, /*compute_uv=*/false);
+
+  // if input requires grad we must compute the singular vectors to make this function differentiable
+  // the singular vectors are not exposed to the user
+  if (torch::autograd::compute_requires_grad(input)) {
+    std::tie(std::ignore, singular_values, std::ignore) =
+        // NOLINTNEXTLINE(bugprone-argument-comment)
+        at::_svd_helper(input, /*!full_matrices=*/true, /*compute_uv=*/true);
+  } else {
+    std::tie(std::ignore, singular_values, std::ignore) =
+        // NOLINTNEXTLINE(bugprone-argument-comment)
+        at::_svd_helper(input, /*!full_matrices=*/false, /*compute_uv=*/false);
+  }
   return singular_values;
 }
 
