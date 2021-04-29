@@ -169,6 +169,44 @@ struct C10_API AutogradMetaFactoryRegisterer {
   }
 };
 
+// c10 does not directly depend on Python, so we need to indirect any
+// calls to Python API via hooks.
+struct C10_API PythonHooks {
+  virtual ~PythonHooks() = default;
+  // NB: py_decref is assumed to take out a GIL, caller does not have to
+  // handle GIL
+  virtual void py_decref(void*) const = 0;
+};
+
+C10_API void SetPythonHooks(PythonHooks* factory);
+C10_API PythonHooks* GetPythonHooks();
+
+struct C10_API PythonHooksRegisterer {
+  explicit PythonHooksRegisterer(PythonHooks* factory) {
+    SetPythonHooks(factory);
+  }
+};
+
+// Intentionally not pluralized as each torch deploy instance
+// will register its own hook, so there will be "hooks"
+struct C10_API TorchDeployHook {
+  virtual ~TorchDeployHook() = default;
+  virtual void notify_destruction(at::TensorImpl*) const = 0;
+};
+
+C10_API void AddTorchDeployHook(TorchDeployHook*);
+C10_API void RemoveTorchDeployHook(TorchDeployHook*);
+
+struct C10_API TorchDeployHookRegisterer {
+  TorchDeployHook* hook_;
+  explicit TorchDeployHookRegisterer(TorchDeployHook* hook) : hook_(hook) {
+    AddTorchDeployHook(hook_);
+  }
+  ~TorchDeployHookRegisterer() {
+    RemoveTorchDeployHook(hook_);
+  }
+};
+
 } // namespace impl
 
 struct C10_API NamedTensorMetaInterface {
@@ -1838,6 +1876,14 @@ public:
     storage_access_should_throw_ = true;
   }
 
+  bool owns_pyobj() {
+    return owns_pyobj_;
+  }
+
+  void set_owns_pyobj(bool b) {
+    owns_pyobj_ = b;
+  }
+
 protected:
   // Policy for adjusting the behavior of is_contiguous(). Allows
   // subclass customization while still being able to inline
@@ -1939,7 +1985,7 @@ protected:
   /* HasContiguityPolicy */ uint8_t has_contiguity_ : 2;
 
   // Tensor is a subclass that does not permit storage access.
-  bool storage_access_should_throw_ = false;
+  bool storage_access_should_throw_ : 1;
 
   // default member initializers for bit-fields only available with -std=c++2a or -std=gnu++2a
   inline void init_bitfields() {
@@ -1954,6 +2000,8 @@ protected:
     is_wrapped_number_ = false;
     allow_tensor_metadata_change_ = true;
     reserved_ = false;
+    owns_pyobj_ = false;
+    storage_access_should_throw_ = false;
   }
 
   // Tensor is stored in the channels last 2d memory format, when dimensions
@@ -2005,6 +2053,13 @@ protected:
   // The logic is that if Extend() or ReserveSpace() were ever called,
   // then subsequent Resize()s will not free up Storage.
   bool reserved_ : 1;
+
+  // If pyobj_ is nullptr, this is always false.
+  // Otherwise, this indicates whether or not TensorImpl owns the pyobj_
+  // or vice versa.  Ordinarily, pyobj_ owns TensorImpl, but if the
+  // Python object's refcount goes to zero, we flip the ownership
+  // direction (to make sure the pyobj stays live).
+  bool owns_pyobj_ : 1;
 
   // The set of DispatchKeys which describe this tensor.  NB: this
   // does NOT include Autograd (historically, it did, but
