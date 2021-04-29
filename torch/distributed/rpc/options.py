@@ -25,19 +25,16 @@ def _to_device_index_map(device_map: Dict[DeviceType, DeviceType]) -> Dict[int, 
     for k in device_map:
         v = device_map[k]
         k, v = torch.device(k), torch.device(v)
-        if k.type != 'cuda' or v.type != 'cuda':
-            raise ValueError(
-                "`set_device_map` only supports CUDA devices, "
-                f"but got device pair {k}: {v}"
 
-            )
-        if v.index in reverse_map:
+        k_index = -1 if k.type == 'cpu' else k.index
+        v_index = -1 if v.type == 'cpu' else v.index
+        if v_index in reverse_map:
             raise ValueError(
                 "`device_map` only supports 1-to-1 mapping, "
                 f"trying to map {k} and {reverse_map[v.index]} to {v.index}"
             )
-        device_index_map[k.index] = v.index
-        reverse_map[v.index] = k.index
+        device_index_map[k_index] = v_index
+        reverse_map[v_index] = k_index
     return device_index_map
 
 

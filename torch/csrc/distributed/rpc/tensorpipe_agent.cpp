@@ -56,10 +56,16 @@ std::vector<c10::DeviceIndex> getDevicesForTensors(
       remoteName);
   std::vector<c10::DeviceIndex> deviceIndices;
   deviceIndices.reserve(tensors.size());
-  bool hasCudaTensor = false;
+  bool hasMappedDevice = false;
   for (const auto& t : tensors) {
     if (t.device().is_cpu()) {
-      deviceIndices.push_back(-1);
+      const auto deviceIter = deviceMap.find(-1);
+      if (deviceIter == deviceMap.end()) {
+        deviceIndices.push_back(-1);
+      } else {
+        deviceIndices.push_back(deviceIter->second);
+        hasMappedDevice = true;
+      }
     } else {
       const auto deviceIter = deviceMap.find(t.device().index());
       TORCH_CHECK(
@@ -69,10 +75,10 @@ std::vector<c10::DeviceIndex> getDevicesForTensors(
           t.device(),
           " but received a tensor on that device.");
       deviceIndices.push_back(deviceIter->second);
-      hasCudaTensor = true;
+      hasMappedDevice = true;
     }
   }
-  if (!hasCudaTensor) {
+  if (!hasMappedDevice) {
     deviceIndices.clear();
   }
   return deviceIndices;

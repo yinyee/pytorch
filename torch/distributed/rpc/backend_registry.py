@@ -210,7 +210,7 @@ def _tensorpipe_check_local_device_maps(name, options):
 
     if len(local_devices) > 0 and not all([
         max(local_devices) < torch.cuda.device_count(),
-        min(local_devices) >= 0,
+        min(local_devices) >= -1,
     ]):
         raise ValueError(
             f"Invalid device in TensorPipe options on {name}:\n"
@@ -238,7 +238,11 @@ def _tensorpipe_check_remote_device_maps(agent, options):
                 key_set = set(device_map.keys())
                 val_set = set(device_map.values())
                 if not all([
-                    min(val_set) >= 0,
+                    len(device_map) == len(key_set),
+                    len(device_map) == len(val_set),  # check 1-to-1 mapping
+                    min(key_set) >= -1,
+                    max(key_set) < device_count,  # check local range
+                    min(val_set) >= -1,
                     max(val_set) < remote_device_count  # check remote range
                 ]):
                     raise ValueError(
