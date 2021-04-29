@@ -42,6 +42,5 @@ Object Object::copy() const {
 Object Object::deepcopy() const {
   return Object(_ivalue()->deepcopy());
 }
-
 } // namespace jit
 } // namespace torch
