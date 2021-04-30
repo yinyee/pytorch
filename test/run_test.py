@@ -159,6 +159,7 @@ TESTS = [
     'distributed/elastic/utils/logging_test',
     'distributed/elastic/utils/util_test',
     'distributed/elastic/utils/distributed_test',
+    'distributed/_sharding_spec/test_sharding_spec',
 ]
 
 # Tests need to be run with pytest.
