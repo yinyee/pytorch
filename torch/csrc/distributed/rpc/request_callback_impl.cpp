@@ -319,8 +319,7 @@ void RequestCallbackImpl::processPythonRemoteCall(
     RpcCommandBase& rpc,
     const std::function<void(Message)>& markComplete,
     const int64_t messageId,
-    const std::shared_ptr<JitFuture>& responseFuture,
-    std::shared_ptr<LazyStreamContext> lsctx) const {
+    const std::shared_ptr<JitFuture>& responseFuture) const {
   auto& uprc = static_cast<UnpickledPythonRemoteCall&>(rpc);
 
   const auto& rrefId = uprc.rrefId();
@@ -358,7 +357,7 @@ void RequestCallbackImpl::processPythonRemoteCall(
         messageId,
         responseFuture,
         uprc.isAsyncExecution(),
-        [ownerRRef, rrefId, forkId, markComplete, lsctx = std::move(lsctx)](
+        [ownerRRef, rrefId, forkId, markComplete](
             const py::object& result,
             const int64_t messageId,
             PythonRpcHandler& /* unused */,
@@ -369,7 +368,6 @@ void RequestCallbackImpl::processPythonRemoteCall(
           IValue py_ivalue = jit::toIValue(result, PyObjectType::get());
 
           py::gil_scoped_release release;
-          ownerRRef->recordAllStreams(lsctx);
           ownerRRef->setValue(std::move(py_ivalue));
           auto m = RemoteRet(rrefId, forkId).toMessage();
           m.setId(messageId);
@@ -391,10 +389,9 @@ void RequestCallbackImpl::processPythonRemoteCall(
 void RequestCallbackImpl::processPythonRRefFetchCall(
     RpcCommandBase& rpc,
     const int64_t messageId,
-    const std::shared_ptr<JitFuture>& responseFuture,
-    std::shared_ptr<LazyStreamContext> lsctx) const {
+    const std::shared_ptr<JitFuture>& responseFuture) const {
   // Making this lambda mutable to allow move-capture it in callbacks
-  auto postProcessing = [responseFuture, lsctx = std::move(lsctx)](
+  auto postProcessing = [responseFuture](
                             const c10::intrusive_ptr<OwnerRRef>& rref,
                             int64_t messageId) mutable {
     auto whenValueSet = rref->getFuture();
@@ -415,7 +412,6 @@ void RequestCallbackImpl::processPythonRRefFetchCall(
       Message m =
           PythonRRefFetchRet(std::move(*result).toIValues()).toMessage();
       m.setId(messageId);
-      rref->blockAllStreams(lsctx);
       responseFuture->markCompleted(
           IValue(c10::make_intrusive<Message>(std::move(m))));
     } catch (py::error_already_set& e) {
@@ -470,10 +466,9 @@ void RequestCallbackImpl::processRpcWithErrors(
     RpcCommandBase& rpc,
     const MessageType& messageType,
     const int64_t messageId,
-    const std::shared_ptr<JitFuture>& responseFuture,
-    std::shared_ptr<LazyStreamContext> ctx) const {
+    const std::shared_ptr<JitFuture>& responseFuture) const {
   try {
-    processRpc(rpc, messageType, messageId, responseFuture, std::move(ctx));
+    processRpc(rpc, messageType, messageId, responseFuture);
   } catch (py::error_already_set& e) {
     responseFuture->markCompleted(handleError(e, messageType, messageId));
     // There are request callback impls in Python, where Python
