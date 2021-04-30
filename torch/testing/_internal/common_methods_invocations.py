@@ -190,6 +190,7 @@ class OpInfo(object):
                  gradcheck_fast_mode=None,  # Whether to use the fast implmentation for gradcheck/gradgradcheck.
                                             # When set to None, defers to the default value provided by the wrapper
                                             # function around gradcheck (testing._internal.common_utils.gradcheck)
+                 test_conjugated_samples=True,
                  ):
 
         # Validates the dtypes are generated from the dispatch-related functions
@@ -251,6 +252,8 @@ class OpInfo(object):
         if aliases is not None:
             self.aliases = tuple(AliasInfo(a) for a in aliases)  # type: ignore[assignment]
 
+        self.test_conjugated_samples = test_conjugated_samples
+
     def __call__(self, *args, **kwargs):
         """Calls the function variant of the operator."""
         return self.op(*args, **kwargs)
@@ -277,7 +280,22 @@ class OpInfo(object):
         """
         return self.operator_variant
 
-    def sample_inputs(self, device, dtype, requires_grad=False, **kwargs):
+    def conjugated_sample_inputs(self, samples):
+        """Returns an iterable of conjugated SampleInputs.
+        """
+
+        conj_samples = list(samples)
+
+        for i in range(len(samples)):
+            sample = conj_samples[i]
+            if isinstance(sample.input, torch.Tensor):
+                sample.input = sample.input.conj()
+            else:
+                sample.input[0] = sample.input[0].conj()
+
+        return tuple(conj_samples)
+
+    def sample_inputs(self, device, dtype, requires_grad=False, include_conjugated_inputs=False, **kwargs):
         """Returns an iterable of SampleInputs.
 
         These samples should be sufficient to test the function works correctly
@@ -290,6 +308,13 @@ class OpInfo(object):
             samples = self.sample_inputs_func(self, device, dtype, requires_grad, **kwargs)
         except TypeError:
             samples = self.sample_inputs_func(self, device, dtype, requires_grad)
+
+        if include_conjugated_inputs:
+            conj_samples = self.conjugated_sample_inputs(samples)
+            samples_list = list(samples)
+            samples_list.extend(conj_samples)
+            samples = tuple(samples_list)
+
         return samples
 
     # Returns True if the test should be skipped and False otherwise
@@ -1827,6 +1852,32 @@ def np_unary_ufunc_integer_promotion_wrapper(fn):
 
     return wrapped_fn
 
+def sample_inputs_spectral_ops(self, device, dtype, requires_grad=False, **kwargs):
+    nd_tensor = make_tensor((S, S + 1, S + 2), device, dtype, low=None, high=None,
+                            requires_grad=requires_grad)
+    tensor = make_tensor((31,), device, dtype, low=None, high=None,
+                         requires_grad=requires_grad)
+
+    if self.ndimensional:
+        return [
+            SampleInput(nd_tensor, kwargs=dict(s=(3, 10), dim=(1, 2), norm='ortho')),
+            SampleInput(nd_tensor, kwargs=dict(norm='ortho')),
+            SampleInput(nd_tensor, kwargs=dict(s=(8,))),
+            SampleInput(tensor),
+
+            *(SampleInput(nd_tensor, kwargs=dict(dim=dim))
+                for dim in [-1, -2, -3, (0, -1)]),
+        ]
+    else:
+        return [
+            SampleInput(nd_tensor, kwargs=dict(n=10, dim=1, norm='ortho')),
+            SampleInput(nd_tensor, kwargs=dict(norm='ortho')),
+            SampleInput(nd_tensor, kwargs=dict(n=7)),
+            SampleInput(tensor),
+
+            *(SampleInput(nd_tensor, kwargs=dict(dim=dim))
+                for dim in [-1, -2, -3]),
+        ]
 
 # Metadata class for Fast Fourier Transforms in torch.fft.
 class SpectralFuncInfo(OpInfo):
@@ -1838,6 +1889,7 @@ class SpectralFuncInfo(OpInfo):
                  ref=None,  # Reference implementation (probably in np.fft namespace)
                  dtypes=floating_and_complex_types(),
                  ndimensional: bool,  # Whether dim argument can be a tuple
+                 sample_inputs_func=sample_inputs_spectral_ops,
                  decorators=None,
                  **kwargs):
         decorators = list(decorators) if decorators is not None else []
@@ -1851,37 +1903,10 @@ class SpectralFuncInfo(OpInfo):
         super().__init__(name=name,
                          dtypes=dtypes,
                          decorators=decorators,
+                         sample_inputs_func=sample_inputs_spectral_ops,
                          **kwargs)
         self.ref = ref if ref is not None else _getattr_qual(np, name)
         self.ndimensional = ndimensional
-
-
-    def sample_inputs(self, device, dtype, requires_grad=False, **kwargs):
-        nd_tensor = make_tensor((S, S + 1, S + 2), device, dtype, low=None, high=None,
-                                requires_grad=requires_grad)
-        tensor = make_tensor((31,), device, dtype, low=None, high=None,
-                             requires_grad=requires_grad)
-
-        if self.ndimensional:
-            return [
-                SampleInput(nd_tensor, kwargs=dict(s=(3, 10), dim=(1, 2), norm='ortho')),
-                SampleInput(nd_tensor, kwargs=dict(norm='ortho')),
-                SampleInput(nd_tensor, kwargs=dict(s=(8,))),
-                SampleInput(tensor),
-
-                *(SampleInput(nd_tensor, kwargs=dict(dim=dim))
-                  for dim in [-1, -2, -3, (0, -1)]),
-            ]
-        else:
-            return [
-                SampleInput(nd_tensor, kwargs=dict(n=10, dim=1, norm='ortho')),
-                SampleInput(nd_tensor, kwargs=dict(norm='ortho')),
-                SampleInput(nd_tensor, kwargs=dict(n=7)),
-                SampleInput(tensor),
-
-                *(SampleInput(nd_tensor, kwargs=dict(dim=dim))
-                  for dim in [-1, -2, -3]),
-            ]
 
 
 class ShapeFuncInfo(OpInfo):
@@ -3749,6 +3774,7 @@ op_db: List[OpInfo] = [
                    dtypesIfCPU=None,
                    dtypesIfCUDA=None,
                    dtypesIfROCM=None,
+                   supports_out=False,
                    skips=(
                        # File "test_unary_ufuncs.py", line 289, in test_reference_numerics
                        #  if not torch.can_cast(numpy_to_torch_dtype_dict[expected.dtype.type], dtype):
@@ -3761,9 +3787,36 @@ op_db: List[OpInfo] = [
                                 dtypes=[torch.int],
                                 active_if=IS_WINDOWS),
                    )),
+    UnaryUfuncInfo('conj_physical',
+                   ref=np.conj,
+                   dtypes=all_types_and_complex_and(torch.bool,
+                                                    torch.bfloat16, torch.half),
+                   dtypesIfCPU=None,
+                   dtypesIfCUDA=None,
+                   dtypesIfROCM=None,
+                   skips=(
+                       # File "test_unary_ufuncs.py", line 289, in test_reference_numerics
+                       #  if not torch.can_cast(numpy_to_torch_dtype_dict[expected.dtype.type], dtype):
+                       # KeyError: <class 'numpy.intc'>
+                       # Following error in Windows CI
+                       SkipInfo('TestUnaryUfuncs', 'test_reference_numerics_normal',
+                                dtypes=[torch.int],
+                                active_if=IS_WINDOWS),
+                       SkipInfo('TestUnaryUfuncs', 'test_reference_numerics_hard',
+                                dtypes=[torch.int],
+                                active_if=IS_WINDOWS),
+                       SkipInfo('TestCommon', 'test_variant_consistency_jit',
+                                dtypes=(torch.float32, )),
+                   )),
+    OpInfo('resolve_conj',
+           dtypes=all_types_and_complex_and(torch.bool, torch.half, torch.bfloat16),
+           sample_inputs_func=sample_inputs_view_as_real,
+           supports_out=False,
+           ),
     OpInfo('view_as_real',
            dtypes=complex_types(),
            sample_inputs_func=sample_inputs_view_as_real,
+           test_conjugated_samples=False,
            ),
     OpInfo('view_as_complex',
            dtypes=floating_types_and(torch.half),
@@ -4108,10 +4161,12 @@ op_db: List[OpInfo] = [
                    dtypesIfCUDA=complex_types(),
                    dtypesIfROCM=complex_types(),
                    supports_out=False,
-                   supports_autograd=False,
+                   test_conjugated_samples=False,
                    skips=(
                        # Skip since real and imag don't have out variants.
                        SkipInfo('TestUnaryUfuncs', 'test_out_arg_all_dtypes'),
+                       # Will be fixed after adding negative bit
+                       SkipInfo('TestCommon', 'test_variant_consistency_eager'),
                    )),
     OpInfo('inverse',
            op=torch.inverse,
@@ -4599,7 +4654,6 @@ op_db: List[OpInfo] = [
                    dtypesIfCUDA=complex_types(),
                    dtypesIfROCM=complex_types(),
                    supports_out=False,
-                   supports_autograd=False,
                    skips=(
                        # Skip since real and imag don't have out variants.
                        SkipInfo('TestUnaryUfuncs', 'test_out_arg_all_dtypes'),
@@ -5913,6 +5967,12 @@ def create_input(call_args, requires_grad=True, non_contiguous=False, call_kwarg
         def maybe_non_contig(tensor):
             return tensor if not non_contiguous else make_non_contiguous(tensor)
 
+        def maybe_conj(tensor):
+            if dtype.is_complex:
+                with torch.no_grad():
+                    tensor = tensor.conj()
+            return tensor
+
         if isinstance(arg, torch.Size) or isinstance(arg, dont_convert):
             return arg
         elif isinstance(arg, tuple) and len(arg) == 0:
@@ -5920,12 +5980,13 @@ def create_input(call_args, requires_grad=True, non_contiguous=False, call_kwarg
             var.requires_grad = requires_grad
             return var
         elif isinstance(arg, tuple) and not isinstance(arg[0], torch.Tensor):
-            return Variable(maybe_non_contig(torch.randn(*arg, dtype=dtype, device=device)), requires_grad=requires_grad)
+            return Variable(maybe_conj(
+                maybe_non_contig(torch.randn(*arg, dtype=dtype, device=device))), requires_grad=requires_grad)
         # double check casting
         elif isinstance(arg, non_differentiable):
             if isinstance(arg.tensor, torch.Tensor):
-                return maybe_non_contig(arg.tensor.to(device=device))
-            return maybe_non_contig(arg.tensor.to(device=device))
+                return maybe_conj(maybe_non_contig(arg.tensor.to(device=device)))
+            return maybe_conj(maybe_non_contig(arg.tensor.to(device=device)))
         elif isinstance(arg, torch.Tensor):
             if arg.dtype == torch.float:
                 arg = arg.double()
@@ -5935,7 +5996,7 @@ def create_input(call_args, requires_grad=True, non_contiguous=False, call_kwarg
                 raise RuntimeError("User provided tensor is real for a test that runs with complex dtype, ",
                                    "which is not supported for now")
             # NOTE: We do clone() after detach() here because we need to be able to change size/storage of v afterwards
-            v = maybe_non_contig(arg).detach().to(device=device).clone()
+            v = maybe_conj(maybe_non_contig(arg)).detach().to(device=device).clone()
             v.requires_grad = requires_grad and (v.is_floating_point() or v.is_complex())
             return v
         elif callable(arg):
