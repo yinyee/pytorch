@@ -9,6 +9,8 @@ from itertools import chain
 import torch
 import torch._C._fx  # type: ignore[import]
 from torch._C import ScriptObject  # type: ignore[attr-defined]
+from functorch import PythonTensor
+from functorch._C import hasPythonKey, removePythonKey
 
 import sys
 from .node import Argument, map_aggregate
@@ -289,9 +291,11 @@ class Tracer(TracerBase):
             value was returned from the ``Module`` invocation.
         """
         module_qualified_name = self.path_of_module(m)
-        if not self.is_leaf_module(m, module_qualified_name):
-            return forward(*args, **kwargs)
-        return self.create_proxy('call_module', module_qualified_name, args, kwargs)
+        # if not self.is_leaf_module(m, module_qualified_name):
+        # import pdb; pdb.set_trace()
+        out = forward(*args, **kwargs)
+        return out
+        # return self.create_proxy('call_module', module_qualified_name, args, kwargs)
 
     def create_args_for_root(self, root_fn, is_module, concrete_args=None):
         """
@@ -402,7 +406,10 @@ class Tracer(TracerBase):
                 for n, p in self.root.named_parameters():
                     if attr_val is p:
                         if n not in parameter_proxy_cache:
-                            parameter_proxy_cache[n] = self.create_proxy('get_attr', n, (), {})
+                            proxy = self.create_proxy('get_attr', n, (), {})
+                            # parameter_proxy_cache
+                            parameter_proxy_cache[n] = key.addKey(PythonTensor(attr_val.shape, proxy))
+                            # parameter_proxy_cache[n].requires_grad = True
                         return parameter_proxy_cache[n]
             return attr_val
 
