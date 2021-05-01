@@ -129,11 +129,6 @@ class TORCH_API TensorExprKernel {
       const torch::jit::Value* v,
       const std::vector<ExprHandle>& axes);
 
-  Tensor* computeSum(const torch::jit::Value* v);
-
-  Tensor* computeSoftmax(const torch::jit::Value* v, bool log_softmax);
-
-  Tensor* computeCatWoConditionals(const torch::jit::Value* v);
 
   Tensor* computeConv2d(const torch::jit::Value* v);
 
@@ -162,12 +157,6 @@ class TORCH_API TensorExprKernel {
     bool keepdim;
     c10::optional<Dtype> dtype;
   };
-
-  // Get the reduction info for the given node, based on properties and inputs.
-  ReductionInfo getReductionInfo(const torch::jit::Node* node);
-
-  // Get the reduction axes for the given node, based on properties and inputs.
-  std::vector<int64_t> getReductionAxes(const torch::jit::Node* node);
 
  private:
   struct UnpackedTensorOptions {
